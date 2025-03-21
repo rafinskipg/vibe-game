@@ -693,10 +693,9 @@ export class EnemySystem {
       console.log(`Enemy spawned targeting objective at distance: ${spawnPosition.distanceTo(objectivePos).toFixed(2)}`);
       console.log(`Initial velocity: ${enemy.velocity.length().toFixed(2)}, direction: (${direction.x.toFixed(2)}, ${direction.z.toFixed(2)})`);
       
-      // Make sure the enemy has the essential userData for identification
+      // Store context in the enemy's mesh for access by other systems
       if (enemy.mesh) {
-        enemy.mesh.userData.isEnemy = true;
-        enemy.mesh.userData.enemyRef = enemy;
+        enemy.mesh.userData.context = this.context;
       }
       
       // Add to enemies array

@@ -23,6 +23,13 @@ export class Game {
     // Game state
     this.isRunning = false;
     this.previousTime = 0;
+    this.isPaused = false;
+    this.helpVisible = false;
+    this.minimapVisible = true;
+    
+    // UI elements
+    this.pauseOverlay = null;
+    this.helpOverlay = null;
   }
   
   init() {
@@ -51,7 +58,7 @@ export class Game {
     this.context.registerSystem('physics', new PhysicsSystem());
     
     // Set up world
-    this.context.world = new World(this.context.scene);
+    this.context.world = new World(this.context.scene, this.context);
     this.context.world.generate();
     
     // Set up player
@@ -116,6 +123,9 @@ export class Game {
     
     // Connect UnitSystem to InventorySystem
     this.connectUnitSystemToInventory();
+    
+    // Setup input listeners
+    this.setupInputListeners();
   }
   
   createObjective() {
@@ -404,75 +414,94 @@ export class Game {
   }
   
   gameLoop() {
-    // Calculate delta time
-    const currentTime = this.context.clock.getElapsedTime();
-    const deltaTime = currentTime - this.previousTime;
+    // Get current timestamp in seconds
+    const currentTime = performance.now() / 1000;
+    
+    // Calculate elapsed time since last frame
+    const deltaTime = Math.min(0.1, currentTime - this.previousTime);
     this.previousTime = currentTime;
     
-    try {
-      // Update physics system first
-      if (this.context.systems.physics) {
-        this.context.systems.physics.update(deltaTime);
-      }
-      
-      // Update input controller
-      this.context.systems.input.update(deltaTime);
+    // Skip updates if game is paused, but keep the loop running
+    if (this.isPaused) {
+      requestAnimationFrame(() => this.gameLoop());
+      return;
+    }
+    
+    // Update physics first (if it exists)
+    if (this.context.systems.physics) {
+      this.context.systems.physics.update(deltaTime);
+    }
+    
+    // Update input controller
+    if (this.context.inputController) {
+      this.context.inputController.update(deltaTime);
       
       // Apply camera zoom from mouse wheel
-      const wheelDelta = this.context.systems.input.resetWheelDelta();
-      if (wheelDelta !== 0) {
-        this.context.camera.zoom(wheelDelta);
+      const zoomDelta = this.context.inputController.getMouseWheelDelta();
+      if (zoomDelta && this.context.camera && this.context.camera.setZoomDelta) {
+        this.context.camera.setZoomDelta(zoomDelta);
       }
-      
-      // Update camera first to ensure it gets mouse movement before the player
-      this.context.camera.update(deltaTime, this.context.systems.input);
-      
-      // Update game components (player after camera so camera gets first use of mouse movement)
-      this.context.player.update(deltaTime, this.context.systems.input);
-      
-      // Reset mouse movement after both camera and player have used it
-      this.context.systems.input.resetMouseMovement();
-      
-      this.context.world.update(deltaTime, this.context.player);
-      
-      // Update animal units with error handling
-      try {
-        if (this.context.systems.unit) {
-          this.context.systems.unit.update(deltaTime);
-        }
-      } catch (error) {
-        console.error("Error updating units:", error);
-      }
-      
-      // Update enemy system with error handling
-      try {
-        if (this.context.systems.enemy) {
-          this.context.systems.enemy.update(deltaTime);
-        }
-      } catch (error) {
-        console.error("Error updating enemies:", error);
-      }
-      
-      // Check for interactions
-      if (this.context.systems.input.isActionPressed()) {
-        const interactedObject = this.context.world.checkInteraction(this.context.player.getPosition(), 2);
-        if (interactedObject) {
-          const reward = interactedObject.interact();
-          if (reward) {
-            this.context.systems.inventory.addItem(reward.type, reward.amount);
-          }
-        }
-      }
-      
-      // Render main scene
-      this.context.renderer.render(this.context.scene, this.context.camera.getCamera());
-      
-      // Update and render minimap
-      this.context.minimap.update();
-    } catch (error) {
-      console.error("Error in game loop:", error);
-      // Continue with the next frame even if this one had an error
     }
+    
+    // Update camera - Note: Camera needs to get mouse movement before player
+    if (this.context.camera) {
+      if (this.context.inputController) {
+        const mouseMovement = this.context.inputController.getMouseMovement();
+        if (mouseMovement && this.context.camera.onMouseMove) {
+          this.context.camera.onMouseMove(mouseMovement.x, mouseMovement.y);
+        }
+      }
+      this.context.camera.update(deltaTime);
+    }
+
+    // Update player
+    if (this.context.player) {
+      this.context.player.update(deltaTime);
+    }
+    
+    // Reset mouse movement after camera and player updates
+    if (this.context.inputController) {
+      this.context.inputController.resetMouseMovement();
+    }
+    
+    // Update world
+    if (this.context.world) {
+      this.context.world.update(deltaTime);
+    }
+    
+    // Update units
+    try {
+      if (this.context.systems.units) {
+        this.context.systems.units.update(deltaTime);
+      }
+    } catch (error) {
+      console.error("Error updating units:", error);
+    }
+    
+    // Update enemies
+    try {
+      if (this.context.systems.enemy) {
+        this.context.systems.enemy.update(deltaTime);
+      }
+    } catch (error) {
+      console.error("Error updating enemies:", error);
+    }
+    
+    // Check for interactions
+    this.checkInteractions();
+    
+    // Render the scene
+    if (this.context.renderer && this.context.scene && this.context.camera) {
+      this.context.renderer.render(this.context.scene, this.context.camera.camera);
+    }
+    
+    // Render minimap
+    if (this.context.minimap && this.minimapVisible) {
+      this.context.minimap.update();
+    }
+    
+    // Continue the loop
+    requestAnimationFrame(() => this.gameLoop());
   }
   
   onWindowResize() {
@@ -509,5 +538,258 @@ export class Game {
     ));
     
     console.log("Game systems initialized with context");
+  }
+
+  setupInputListeners() {
+    document.addEventListener('keydown', (event) => {
+      // Pass event to input controller
+      if (this.context.inputController) {
+        this.context.inputController.handleKeyDown(event);
+      }
+      
+      // Specific game controls
+      switch (event.key) {
+        case 'p':
+          this.togglePause();
+          break;
+        case 'o':
+          // Toggle physics debug mode
+          if (this.context.systems && this.context.systems.physics) {
+            const isDebugOn = this.context.systems.physics.toggleDebug();
+            console.log(`Physics debug mode: ${isDebugOn ? 'ON' : 'OFF'}`);
+          }
+          break;
+        case 'm':
+          this.toggleMinimap();
+          break;
+        case 'h':
+          this.toggleHelp();
+          break;
+        case 'u':
+          // Toggle unit menu 
+          if (this.context.systems && this.context.systems.units) {
+            this.context.systems.units.toggleMenu();
+          }
+          break;
+        // Add other game-specific shortcuts here
+      }
+    });
+  }
+
+  togglePause() {
+    this.isPaused = !this.isPaused;
+    
+    // Create or remove pause screen
+    if (this.isPaused) {
+      // Create pause overlay if it doesn't exist
+      if (!this.pauseOverlay) {
+        this.pauseOverlay = document.createElement('div');
+        this.pauseOverlay.style.position = 'absolute';
+        this.pauseOverlay.style.top = '0';
+        this.pauseOverlay.style.left = '0';
+        this.pauseOverlay.style.width = '100%';
+        this.pauseOverlay.style.height = '100%';
+        this.pauseOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+        this.pauseOverlay.style.color = 'white';
+        this.pauseOverlay.style.display = 'flex';
+        this.pauseOverlay.style.flexDirection = 'column';
+        this.pauseOverlay.style.justifyContent = 'center';
+        this.pauseOverlay.style.alignItems = 'center';
+        this.pauseOverlay.style.zIndex = '1000';
+        this.pauseOverlay.style.fontFamily = 'Arial, sans-serif';
+        
+        const title = document.createElement('h1');
+        title.textContent = 'PAUSED';
+        title.style.marginBottom = '20px';
+        
+        const instructions = document.createElement('p');
+        instructions.textContent = 'Press P to resume';
+        
+        this.pauseOverlay.appendChild(title);
+        this.pauseOverlay.appendChild(instructions);
+      }
+      
+      document.body.appendChild(this.pauseOverlay);
+    } else {
+      // Remove pause overlay
+      if (this.pauseOverlay && this.pauseOverlay.parentNode) {
+        this.pauseOverlay.parentNode.removeChild(this.pauseOverlay);
+      }
+    }
+    
+    console.log(`Game ${this.isPaused ? 'paused' : 'resumed'}`);
+  }
+  
+  toggleMinimap() {
+    if (!this.context.minimap) return;
+    
+    this.minimapVisible = !this.minimapVisible;
+    
+    // Toggle minimap visibility
+    if (this.context.minimap.domElement) {
+      this.context.minimap.domElement.style.display = 
+        this.minimapVisible ? 'block' : 'none';
+    }
+    
+    console.log(`Minimap ${this.minimapVisible ? 'shown' : 'hidden'}`);
+  }
+  
+  toggleHelp() {
+    this.helpVisible = !this.helpVisible;
+    
+    // Create or remove help screen
+    if (this.helpVisible) {
+      // Create help overlay if it doesn't exist
+      if (!this.helpOverlay) {
+        this.helpOverlay = document.createElement('div');
+        this.helpOverlay.style.position = 'absolute';
+        this.helpOverlay.style.top = '50%';
+        this.helpOverlay.style.left = '50%';
+        this.helpOverlay.style.transform = 'translate(-50%, -50%)';
+        this.helpOverlay.style.width = '600px';
+        this.helpOverlay.style.padding = '20px';
+        this.helpOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+        this.helpOverlay.style.color = 'white';
+        this.helpOverlay.style.borderRadius = '10px';
+        this.helpOverlay.style.zIndex = '1000';
+        this.helpOverlay.style.fontFamily = 'Arial, sans-serif';
+        
+        const title = document.createElement('h2');
+        title.textContent = 'Help & Controls';
+        title.style.marginBottom = '15px';
+        title.style.borderBottom = '1px solid white';
+        title.style.paddingBottom = '10px';
+        this.helpOverlay.appendChild(title);
+        
+        // Add control information
+        const controlsList = [
+          { key: 'WASD', desc: 'Move character' },
+          { key: 'Mouse', desc: 'Look around' },
+          { key: 'Click', desc: 'Attack / Interact' },
+          { key: 'E', desc: 'Interact with objects' },
+          { key: 'Space', desc: 'Jump' },
+          { key: 'Shift', desc: 'Sprint' },
+          { key: 'U', desc: 'Toggle unit menu' },
+          { key: 'M', desc: 'Toggle minimap' },
+          { key: 'P', desc: 'Pause game' },
+          { key: 'O', desc: 'Toggle physics debug view' },
+          { key: 'H', desc: 'Toggle this help screen' },
+          { key: '1-5', desc: 'Select different animal units' }
+        ];
+        
+        // Create controls table
+        const table = document.createElement('table');
+        table.style.width = '100%';
+        table.style.borderCollapse = 'collapse';
+        
+        // Add controls to table
+        controlsList.forEach(control => {
+          const row = document.createElement('tr');
+          
+          const keyCell = document.createElement('td');
+          keyCell.style.padding = '8px';
+          keyCell.style.fontWeight = 'bold';
+          keyCell.style.width = '80px';
+          keyCell.textContent = control.key;
+          
+          const descCell = document.createElement('td');
+          descCell.style.padding = '8px';
+          descCell.textContent = control.desc;
+          
+          row.appendChild(keyCell);
+          row.appendChild(descCell);
+          table.appendChild(row);
+        });
+        
+        this.helpOverlay.appendChild(table);
+        
+        // Add close button
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.marginTop = '20px';
+        closeBtn.style.padding = '8px 16px';
+        closeBtn.style.backgroundColor = '#444';
+        closeBtn.style.border = 'none';
+        closeBtn.style.color = 'white';
+        closeBtn.style.borderRadius = '4px';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.onclick = () => this.toggleHelp();
+        
+        this.helpOverlay.appendChild(closeBtn);
+      }
+      
+      document.body.appendChild(this.helpOverlay);
+    } else {
+      // Remove help overlay
+      if (this.helpOverlay && this.helpOverlay.parentNode) {
+        this.helpOverlay.parentNode.removeChild(this.helpOverlay);
+      }
+    }
+    
+    console.log(`Help screen ${this.helpVisible ? 'shown' : 'hidden'}`);
+  }
+
+  checkInteractions() {
+    // Check if player is trying to interact with something
+    if (this.context.inputController && 
+        this.context.inputController.isActionPressed &&
+        this.context.inputController.isActionPressed() &&
+        this.context.player &&
+        this.context.world) {
+      
+      // Get player position and check for nearby interactive objects
+      const playerPos = this.context.player.getPosition();
+      const interactionRange = 2.5; // How far the player can interact
+      
+      const interactiveObject = this.context.world.checkInteraction(
+        playerPos, 
+        interactionRange
+      );
+      
+      // Handle interaction if an object was found
+      if (interactiveObject) {
+        try {
+          // Trigger the interaction
+          const reward = interactiveObject.interact();
+          
+          // Add rewards to inventory if applicable
+          if (reward && this.context.systems.inventory) {
+            this.context.systems.inventory.addItem(reward.type, reward.amount);
+            
+            // Show feedback to the player
+            console.log(`Received ${reward.amount} ${reward.type}`);
+            this.showNotification(`Received ${reward.amount} ${reward.type}!`);
+          }
+        } catch (error) {
+          console.error("Error during interaction:", error);
+        }
+      }
+    }
+  }
+  
+  showNotification(message, duration = 2000) {
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.style.position = 'absolute';
+    notification.style.bottom = '50px';
+    notification.style.left = '50%';
+    notification.style.transform = 'translateX(-50%)';
+    notification.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+    notification.style.color = 'white';
+    notification.style.padding = '10px 20px';
+    notification.style.borderRadius = '5px';
+    notification.style.fontFamily = 'Arial, sans-serif';
+    notification.style.zIndex = '1000';
+    notification.textContent = message;
+    
+    // Add to document
+    document.body.appendChild(notification);
+    
+    // Remove after specified duration
+    setTimeout(() => {
+      if (notification.parentNode) {
+        notification.parentNode.removeChild(notification);
+      }
+    }, duration);
   }
 } 

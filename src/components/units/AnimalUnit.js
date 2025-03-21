@@ -7,64 +7,72 @@ export class AnimalUnit {
     this.world = world;
     this.type = type;
     this.position = position.clone();
+    this.attributes = attributes;
     
-    // Make sure attributes is defined
-    this.attributes = attributes || {};
+    // Stats
+    this.health = attributes.health;
+    this.maxHealth = attributes.health;
     
-    // Set default values for missing attributes
-    const defaultAttributes = {
-      health: 100,
-      damage: 10,
-      speed: 5,
-      vision: 20,
-      color: 0x888888,
-      attackRange: 2
-    };
+    // State
+    this.isAlive = true;
+    this.state = 'wander'; // wander, follow, flee, idle, die
+    this.isFlockLeader = false;
+    this.flockmates = [];
     
-    // Copy attributes from provided or use defaults
-    this.health = this.attributes.health || defaultAttributes.health;
-    this.maxHealth = this.health;
-    this.damage = this.attributes.damage || defaultAttributes.damage;
-    this.speed = this.attributes.speed || defaultAttributes.speed;
-    this.vision = this.attributes.vision || defaultAttributes.vision;
-    this.color = this.attributes.color || defaultAttributes.color;
-    this.attackRange = this.attributes.attackRange || defaultAttributes.attackRange;
-    
-    console.log(`Created ${type} unit with health=${this.health}, speed=${this.speed}`);
-    
-    // Movement and behavior
+    // Movement
     this.velocity = new THREE.Vector3();
-    this.rotation = new THREE.Euler(0, 0, 0);
-    this.state = 'wandering'; // Start with wandering instead of seeking
-    this.target = null;
-    this.pathfindingTimer = 0;
-    this.pathfindingInterval = 1; // seconds between pathfinding updates
-    this.wanderTimer = 0;
-    this.wanderDuration = 5; // seconds to wander before changing direction
+    this.speed = attributes.speed || 1.5;
     this.wanderPoint = null;
-    this.wanderRadius = 30; // distance to wander (increased from 15)
-    this.stuckCheckTimer = 0;
-    this.lastPosition = position.clone();
-    this.stuckThreshold = 3; // seconds to consider unit stuck
+    this.wanderRadius = 30;
+    this.wanderTimeout = 0;
+    this.wanderDuration = 0;
+    this.targetDistance = 0;
     
-    // Create mesh/model
-    try {
-      this.createModel();
-      
-      // Mark as unit for identification
-      if (this.mesh) {
-        this.mesh.userData.isUnit = true;
-        this.mesh.userData.unitRef = this;
-      }
-      
-      // Set an initial wander point right away
-      this.setRandomWanderPoint();
-    } catch (error) {
-      console.error(`Error creating unit ${type}:`, error);
+    // Physics
+    this.physicsEnabled = false;
+    this.physicsBody = null;
+    
+    // Get context from scene or player
+    this.context = null;
+    if (scene.userData && scene.userData.context) {
+      this.context = scene.userData.context;
+    } else if (player && player.context) {
+      this.context = player.context;
     }
+    
+    // Visuals
+    this.createMesh();
+    this.createHealthBar();
+    
+    // Initialize physics if available
+    if (this.context && this.context.systems && this.context.systems.physics) {
+      this.physicsEnabled = true;
+      this.initPhysics();
+    }
+    
+    // Set initial wander point
+    this.setRandomWanderPoint();
   }
   
-  createModel() {
+  initPhysics() {
+    // Scale the physics body based on the animal's size
+    const scale = this.attributes.scale || 1.0;
+    const radius = 0.5 * scale;
+    const height = 1.5 * scale;
+    
+    // Mass should be proportional to scale but lighter than enemies
+    const mass = 40 * (scale * scale);
+    
+    // Create physics body
+    this.physicsBody = this.context.systems.physics.createAnimalBody(
+      this.mesh, radius, height, mass
+    );
+    
+    // Add friction to make movement more controllable
+    this.physicsBody.linearDamping = 0.9;
+  }
+  
+  createMesh() {
     // Create a simple animal model based on type
     let geometry;
     
@@ -89,7 +97,7 @@ export class AnimalUnit {
     }
     
     const material = new THREE.MeshStandardMaterial({
-      color: this.color,
+      color: this.attributes.color || 0x888888,
       roughness: 0.7,
       metalness: 0.1
     });
@@ -154,6 +162,8 @@ export class AnimalUnit {
   }
   
   update(deltaTime) {
+    if (!this.isAlive) return;
+    
     // Update stuck check timer
     this.stuckCheckTimer += deltaTime;
     if (this.stuckCheckTimer >= 1) { // Check every second
@@ -161,17 +171,139 @@ export class AnimalUnit {
       this.stuckCheckTimer = 0;
     }
 
-    // State machine for behavior
+    // Handle different states
     switch (this.state) {
-      case 'seeking':
-        this.updateSeeking(deltaTime);
+      case 'wander':
+        this.handleWandering(deltaTime);
         break;
-      case 'attacking':
-        this.updateAttacking(deltaTime);
+      case 'follow':
+        this.followTarget(this.player, deltaTime);
         break;
-      case 'wandering':
-        this.updateWandering(deltaTime);
+      case 'flee':
+        this.fleeFrom(this.player, deltaTime);
         break;
+      case 'idle':
+        // Do nothing, just stay in place
+        break;
+      case 'die':
+        // Nothing to do, handled in takeDamage
+        break;
+    }
+    
+    if (this.physicsEnabled && this.physicsBody) {
+      // Direction and target will depend on state
+      let targetPoint, direction;
+      
+      if (this.state === 'wander' && this.wanderPoint) {
+        targetPoint = this.wanderPoint;
+        direction = new THREE.Vector3()
+          .subVectors(targetPoint, this.position)
+          .normalize();
+          
+        // Update target distance
+        this.targetDistance = this.position.distanceTo(targetPoint);
+        
+        // If we're close to the wander point, set a new one
+        if (this.targetDistance < 1.0) {
+          this.setRandomWanderPoint();
+        }
+      } else if (this.state === 'follow') {
+        targetPoint = this.player.position;
+        direction = new THREE.Vector3()
+          .subVectors(targetPoint, this.position)
+          .normalize();
+      } else if (this.state === 'flee') {
+        direction = new THREE.Vector3()
+          .subVectors(this.position, this.player.position)
+          .normalize();
+      } else {
+        // Default: just use current direction or zero
+        direction = new THREE.Vector3();
+      }
+      
+      if (direction.length() > 0.1) {
+        // Apply force in the desired direction
+        const forceMultiplier = 10; // Scale force by this amount
+        const force = new THREE.Vector3(
+          direction.x * this.speed * forceMultiplier,
+          0,
+          direction.z * this.speed * forceMultiplier
+        );
+        
+        // Clear any existing velocity and apply new force
+        this.physicsBody.velocity.setZero();
+        this.physicsBody.applyLocalForce(force, new THREE.Vector3(0, 0, 0));
+        
+        // Update visual rotation to face movement direction
+        const targetAngle = Math.atan2(direction.x, direction.z);
+        if (this.mesh) {
+          this.mesh.rotation.y = targetAngle;
+        }
+      }
+      
+      // Update position from physics
+      this.position.copy(
+        this.context.systems.physics.cannonVec3ToThree(this.physicsBody.position)
+      );
+      
+      // Make sure group position is updated
+      if (this.group) {
+        this.group.position.copy(this.position);
+      }
+    } else {
+      // Original non-physics movement
+      if (this.state === 'wander' && this.wanderPoint) {
+        const direction = new THREE.Vector3()
+          .subVectors(this.wanderPoint, this.position)
+          .normalize();
+        
+        // Update velocity based on direction
+        this.velocity.x = direction.x * this.speed;
+        this.velocity.z = direction.z * this.speed;
+        
+        // Update target distance
+        this.targetDistance = this.position.distanceTo(this.wanderPoint);
+        
+        // If we're close to the wander point, set a new one
+        if (this.targetDistance < 1.0) {
+          this.setRandomWanderPoint();
+        }
+      } else if (this.state === 'follow') {
+        const direction = new THREE.Vector3()
+          .subVectors(this.player.position, this.position)
+          .normalize();
+        
+        this.velocity.x = direction.x * this.speed;
+        this.velocity.z = direction.z * this.speed;
+      } else if (this.state === 'flee') {
+        const direction = new THREE.Vector3()
+          .subVectors(this.position, this.player.position)
+          .normalize();
+        
+        this.velocity.x = direction.x * this.speed;
+        this.velocity.z = direction.z * this.speed;
+      }
+      
+      // Apply movement
+      const movement = this.velocity.clone().multiplyScalar(deltaTime);
+      this.position.add(movement);
+      
+      // Get terrain height
+      const terrainHeight = this.world.getHeightAt(this.position.x, this.position.z);
+      this.position.y = terrainHeight;
+      
+      // Update group position
+      if (this.group) {
+        this.group.position.copy(this.position);
+      }
+      
+      // Face toward movement direction
+      if (this.velocity.length() > 0.1) {
+        const targetAngle = Math.atan2(this.velocity.x, this.velocity.z);
+        if (this.mesh) {
+          this.mesh.rotation.y = targetAngle;
+        }
+      }
     }
     
     // Update position
@@ -203,25 +335,7 @@ export class AnimalUnit {
     this.lastPosition.copy(this.position);
   }
   
-  updateSeeking(deltaTime) {
-    // If we have a target, attack it
-    if (this.target && !this.target.isDead()) {
-      this.state = 'attacking';
-      return;
-    }
-    
-    // No target, look for one
-    this.findNearbyEnemies();
-    
-    // If still no target, wander
-    if (!this.target) {
-      this.state = 'wandering';
-      this.setRandomWanderPoint();
-      return;
-    }
-  }
-  
-  updateWandering(deltaTime) {
+  handleWandering(deltaTime) {
     // If no wander point, set one
     if (!this.wanderPoint) {
       this.setRandomWanderPoint();
@@ -272,94 +386,6 @@ export class AnimalUnit {
       // Occasional logging to monitor movement
       if (Math.random() < 0.01) { // Log only occasionally to avoid spam
         console.log(`${this.type} unit moving: pos=${this.position.x.toFixed(2)},${this.position.z.toFixed(2)} vel=${this.velocity.length().toFixed(2)}`);
-      }
-    }
-  }
-  
-  updateAttacking(deltaTime) {
-    // Safely check if target exists and isn't dead
-    let targetIsDead = true;
-    
-    if (this.target) {
-      try {
-        if (typeof this.target.isDead === 'function') {
-          targetIsDead = this.target.isDead();
-        } else {
-          // If there's no isDead function, assume the target is still valid
-          targetIsDead = false;
-        }
-      } catch (error) {
-        console.error("Error checking if target is dead:", error);
-        // Assume dead on error
-        targetIsDead = true;
-      }
-    }
-    
-    // Check if target still exists
-    if (!this.target || targetIsDead) {
-      this.target = null;
-      this.state = 'wandering';
-      this.wanderTimer = 0;
-      return;
-    }
-    
-    // Move toward target - safely get position
-    let targetPosition;
-    try {
-      if (typeof this.target.getPosition === 'function') {
-        targetPosition = this.target.getPosition();
-      } else {
-        // If we can't get position, switch to wandering
-        this.target = null;
-        this.state = 'wandering';
-        this.wanderTimer = 0;
-        return;
-      }
-    } catch (error) {
-      console.error("Error getting target position:", error);
-      this.target = null;
-      this.state = 'wandering';
-      this.wanderTimer = 0;
-      return;
-    }
-    
-    const direction = new THREE.Vector3().subVectors(targetPosition, this.position);
-    const distance = direction.length();
-    
-    // Attack if close enough
-    if (distance < 2) {
-      // Do damage - safely
-      try {
-        if (typeof this.target.takeDamage === 'function') {
-          this.target.takeDamage(this.damage * deltaTime);
-        }
-      } catch (error) {
-        console.error("Error damaging target:", error);
-      }
-      
-      // Face the target
-      const targetRotation = Math.atan2(direction.x, direction.z);
-      this.rotation.y = targetRotation;
-    } else {
-      // Move toward target
-      direction.normalize();
-      this.velocity.copy(direction).multiplyScalar(this.speed * deltaTime);
-      this.position.add(this.velocity);
-      
-      // Rotate to face movement direction
-      if (direction.length() > 0.1) {
-        const targetRotation = Math.atan2(direction.x, direction.z);
-        this.rotation.y = targetRotation;
-      }
-      
-      // Adjust height based on terrain - safely
-      try {
-        if (this.world && typeof this.world.getHeightAt === 'function') {
-          this.position.y = this.world.getHeightAt(this.position.x, this.position.z) + 0.5;
-        }
-      } catch (error) {
-        // Keep existing height on error
-        console.error("Error adjusting height:", error);
       }
     }
   }
@@ -519,6 +545,12 @@ export class AnimalUnit {
   }
   
   dispose() {
+    // Remove physics body if it exists
+    if (this.physicsEnabled && this.physicsBody && this.context && this.context.systems.physics) {
+      this.context.systems.physics.removeBody(this.physicsBody);
+      this.physicsBody = null;
+    }
+    
     // Remove from scene
     if (this.mesh) {
       this.scene.remove(this.mesh);

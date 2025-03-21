@@ -26,9 +26,45 @@ export class EnemyUnit {
     this.speed = attributes.speed;
     this.visionRange = attributes.vision;
     
+    // Physics
+    this.physicsEnabled = false;
+    this.physicsBody = null;
+    
+    // Get context from scene or player
+    this.context = null;
+    if (scene.userData && scene.userData.context) {
+      this.context = scene.userData.context;
+    } else if (player && player.context) {
+      this.context = player.context;
+    }
+    
     // Visuals
     this.createMesh();
     this.createHealthBar();
+    
+    // Initialize physics if available
+    if (this.context && this.context.systems && this.context.systems.physics) {
+      this.physicsEnabled = true;
+      this.initPhysics();
+    }
+  }
+  
+  initPhysics() {
+    // Scale the physics body based on the enemy's size
+    const scale = this.attributes.scale || 1.0;
+    const radius = 0.5 * scale;
+    const height = 2.0 * scale;
+    
+    // Mass should be proportional to scale
+    const mass = 60 * (scale * scale);
+    
+    // Create physics body
+    this.physicsBody = this.context.systems.physics.createEnemyBody(
+      this.mesh, radius, height, mass
+    );
+    
+    // Add friction to make movement more controllable
+    this.physicsBody.linearDamping = 0.9;
   }
   
   createMesh() {
@@ -208,32 +244,10 @@ export class EnemyUnit {
       // Silently fail - no need to spam console with this error
     }
     
-    // UPDATED: Get objective from context or fall back to window.game
-    let objective = null;
-    
-    // Try to get context from scene userData
-    let context = null;
-    if (this.scene.userData && this.scene.userData.context) {
-      context = this.scene.userData.context;
-    } else if (window.gameContext) {
-      context = window.gameContext;
-    }
-    
-    // Try to get objective from context
-    if (context && context.objective) {
-      objective = context.objective;
-    } 
-    // Fallback to window.game for backward compatibility
-    else if (window.game && window.game.objective) {
-      objective = window.game.objective;
-    }
-    
-    // Set target to objective if available, otherwise fall back to player
-    this.target = objective || this.player;
-    this.state = 'chase';
-    
-    // Get objective position
-    const targetPos = this.target.getPosition ? this.target.getPosition() : this.target.position;
+    // Get target
+    const targetPos = this.target && this.target.getPosition ? 
+      this.target.getPosition() : 
+      (this.target.position ? this.target.position : this.player.position);
     
     // Calculate distance to target
     const distanceToTarget = this.position.distanceTo(targetPos);
@@ -259,44 +273,83 @@ export class EnemyUnit {
         break;
     }
     
-    // FIXED: ALWAYS apply movement directly toward target
-    const direction = new THREE.Vector3()
-      .subVectors(targetPos, this.position)
-      .normalize();
-    
-    // Set a minimum velocity to ensure enemies always move
-    const minSpeed = this.speed * 0.75;
-    
-    // Direct movement toward target - SIMPLIFIED AND MORE RELIABLE
-    this.velocity.x = direction.x * this.speed;
-    this.velocity.z = direction.z * this.speed;
-    
-    // Update position with velocity
-    const movement = this.velocity.clone().multiplyScalar(deltaTime);
-    this.position.add(movement);
-    
-    // Set Y position based on terrain height
-    const terrainHeight = this.world.getHeightAt(this.position.x, this.position.z);
-    this.position.y = terrainHeight;
-    
-    // CRITICAL FIX: Update group position properly
-    if (this.group) {
-      this.group.position.copy(this.position);
-    }
-    
-    // Face toward movement direction
-    if (this.velocity.length() > 0.1) {
-      const targetAngle = Math.atan2(this.velocity.x, this.velocity.z);
-      if (this.mesh) {
-        this.mesh.rotation.y = targetAngle;
+    if (this.physicsEnabled && this.physicsBody) {
+      // Calculate desired direction
+      const direction = new THREE.Vector3()
+        .subVectors(targetPos, this.position)
+        .normalize();
+      
+      // Clear any existing velocity
+      this.physicsBody.velocity.setZero();
+      
+      // Apply force in the desired direction based on enemy state
+      if (this.state === 'chase') {
+        const forceMultiplier = 10; // Scale force by this amount
+        const force = new THREE.Vector3(
+          direction.x * this.speed * forceMultiplier,
+          0,
+          direction.z * this.speed * forceMultiplier
+        );
+        
+        this.physicsBody.applyLocalForce(force, new THREE.Vector3(0, 0, 0));
       }
+      
+      // Update position from physics
+      this.position.copy(
+        this.context.systems.physics.cannonVec3ToThree(this.physicsBody.position)
+      );
+      
+      // Update visual rotation to face movement direction
+      if (direction.length() > 0.1) {
+        const targetAngle = Math.atan2(direction.x, direction.z);
+        if (this.mesh) {
+          this.mesh.rotation.y = targetAngle;
+        }
+      }
+      
+      // Make sure group position is updated
+      if (this.group) {
+        this.group.position.copy(this.position);
+      }
+    } else {
+      // Original non-physics movement
+      const direction = new THREE.Vector3()
+        .subVectors(targetPos, this.position)
+        .normalize();
+      
+      // Direct movement toward target
+      this.velocity.x = direction.x * this.speed;
+      this.velocity.z = direction.z * this.speed;
+      
+      // Update position with velocity
+      const movement = this.velocity.clone().multiplyScalar(deltaTime);
+      this.position.add(movement);
+      
+      // Set Y position based on terrain height
+      const terrainHeight = this.world.getHeightAt(this.position.x, this.position.z);
+      this.position.y = terrainHeight;
+      
+      // Update group position
+      if (this.group) {
+        this.group.position.copy(this.position);
+      }
+      
+      // Face toward movement direction
+      if (this.velocity.length() > 0.1) {
+        const targetAngle = Math.atan2(this.velocity.x, this.velocity.z);
+        if (this.mesh) {
+          this.mesh.rotation.y = targetAngle;
+        }
+      }
+      
+      // Check if enemy is stuck
+      this.checkStuckStatus(targetPos);
     }
     
-    // Add debug visual for velocity
-    this.showVelocityVector();
-    
-    // Check if enemy is stuck
-    this.checkStuckStatus(targetPos);
+    // Add debug visual for velocity (if not using physics)
+    if (!this.physicsEnabled) {
+      this.showVelocityVector();
+    }
     
     // Log movement info occasionally
     if (Math.random() < 0.01) {
@@ -675,6 +728,12 @@ export class EnemyUnit {
   }
   
   dispose() {
+    // Remove physics body if it exists
+    if (this.physicsEnabled && this.physicsBody && this.context && this.context.systems.physics) {
+      this.context.systems.physics.removeBody(this.physicsBody);
+      this.physicsBody = null;
+    }
+    
     // Remove from scene
     if (this.group) {
       this.scene.remove(this.group);

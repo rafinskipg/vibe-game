@@ -541,25 +541,28 @@ export class UnitSystem {
   
   spawnUnit(unitType, position) {
     if (!this.unitTypes[unitType]) {
-      console.error(`Unit type ${unitType} not found`);
-      return;
+      console.error(`Unknown unit type: ${unitType}`);
+      return null;
     }
     
     // Check if player has enough resources
-    if (!this.checkCost(this.unitTypes[unitType].cost)) {
-      // Show notification about insufficient resources
+    const cost = this.unitTypes[unitType].cost;
+    if (!this.inventorySystem.hasItem('wood', cost)) {
+      console.log(`Not enough wood to spawn ${unitType}, need ${cost}`);
+      
+      // Show notification
       const notification = document.createElement('div');
       notification.style.position = 'absolute';
-      notification.style.top = '50%';
+      notification.style.bottom = '50px';
       notification.style.left = '50%';
-      notification.style.transform = 'translate(-50%, -50%)';
-      notification.style.backgroundColor = 'rgba(255, 0, 0, 0.8)';
+      notification.style.transform = 'translateX(-50%)';
+      notification.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
       notification.style.color = 'white';
       notification.style.padding = '10px 20px';
       notification.style.borderRadius = '5px';
       notification.style.fontFamily = 'Arial, sans-serif';
       notification.style.zIndex = '1000';
-      notification.textContent = `Not enough resources to spawn ${this.unitTypes[unitType].name}`;
+      notification.textContent = `Not enough wood! Need ${cost} wood to create ${this.unitTypes[unitType].name}.`;
       document.body.appendChild(notification);
       
       // Remove notification after a delay
@@ -567,25 +570,42 @@ export class UnitSystem {
         document.body.removeChild(notification);
       }, 2000);
       
-      return;
+      return null;
     }
     
-    // Deduct resources
-    this.deductResources(this.unitTypes[unitType].cost);
+    // Deduct cost
+    this.inventorySystem.removeItem('wood', cost);
     
-    // Prepare the unit attributes with all needed properties
-    const unitData = this.unitTypes[unitType];
+    // Copy attributes from unit type
     const attributes = {
-      health: unitData.health,
-      damage: unitData.damage,
-      speed: unitData.speed,
-      attackRange: unitData.attackRange,
-      attackSpeed: unitData.attackSpeed,
-      vision: 30, // Give units a good vision range
-      color: this.getUnitColor(unitType)
+      health: this.unitTypes[unitType].health,
+      damage: this.unitTypes[unitType].damage,
+      speed: this.unitTypes[unitType].speed,
+      attackRange: this.unitTypes[unitType].attackRange,
+      attackSpeed: this.unitTypes[unitType].attackSpeed,
+      scale: 1.0 // Default scale
     };
     
-    console.log(`Spawning ${unitType} with attributes:`, attributes);
+    // Add color based on unit type
+    switch (unitType) {
+      case 'wolf':
+        attributes.color = 0x888888; // Gray
+        break;
+      case 'bear':
+        attributes.color = 0x8B4513; // Brown
+        break;
+      case 'eagle':
+        attributes.color = 0xA0522D; // Sienna
+        break;
+      case 'fox':
+        attributes.color = 0xD2691E; // Orange-brown
+        break;
+      case 'deer':
+        attributes.color = 0xCD853F; // Tan
+        break;
+      default:
+        attributes.color = 0xAAAAAA; // Default gray
+    }
     
     // Create the unit
     try {
@@ -597,6 +617,11 @@ export class UnitSystem {
         position,
         attributes
       );
+      
+      // Store context in the unit's mesh for access by other systems
+      if (unit.mesh) {
+        unit.mesh.userData.context = this.context;
+      }
       
       // Add to units collection
       this.units.push(unit);
@@ -629,18 +654,6 @@ export class UnitSystem {
     }
   }
   
-  // Helper to get color for unit type
-  getUnitColor(unitType) {
-    switch (unitType) {
-      case 'wolf': return 0x777777;
-      case 'bear': return 0x8B4513;
-      case 'eagle': return 0xA66C29;
-      case 'fox': return 0xE67E22;
-      case 'deer': return 0xD2B48C;
-      default: return 0x888888;
-    }
-  }
-  
   update(deltaTime) {
     // Update all units
     for (let i = this.units.length - 1; i >= 0; i--) {
@@ -665,11 +678,6 @@ export class UnitSystem {
     // if (window.game && window.game.inventorySystem) {
     //   return window.game.inventorySystem.hasWood(cost);
     // }
-  }
-  
-  // Deduct resources from player inventory
-  deductResources(cost) {
-    // TODO: Connect to actual inventory system
   }
   
   // Get all units in a radius around a position

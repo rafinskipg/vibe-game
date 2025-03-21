@@ -1,17 +1,15 @@
 import * as THREE from 'three';
 
 export class Player {
-  constructor(scene, world) {
+  constructor(scene, world, context) {
     this.scene = scene;
     this.world = world;
+    this.context = context;
     
     // Player properties
     this.moveSpeed = 5;
     this.turnSpeed = 2;
-    this.gravity = -9.8;
     this.jumpForce = 5;
-    this.verticalVelocity = 0;
-    this.isOnGround = true;
     
     // Combat properties
     this.health = 100;
@@ -27,6 +25,11 @@ export class Player {
     // Player state
     this.position = new THREE.Vector3(0, 1, 0);
     this.rotation = new THREE.Euler(0, 0, 0);
+    this.isOnGround = true;
+    
+    // Physics 
+    this.physicsEnabled = false;
+    this.physicsBody = null;
     
     this.init();
   }
@@ -54,18 +57,39 @@ export class Player {
     this.arrow.position.set(0, 0, 0.8);
     this.arrow.rotation.x = Math.PI / 2;
     this.mesh.add(this.arrow);
+    
+    // Initialize physics if available
+    if (this.context && this.context.systems && this.context.systems.physics) {
+      this.physicsEnabled = true;
+      this.initPhysics();
+    }
+  }
+  
+  initPhysics() {
+    // Create physics body for player
+    this.physicsBody = this.context.systems.physics.createPlayerBody(this.mesh);
+    
+    // Listen for collision events to determine if player is on ground
+    this.physicsBody.addEventListener('collide', (event) => {
+      // Calculate the normal vector of the collision
+      const contactNormal = new THREE.Vector3();
+      const contact = event.contact;
+      
+      // Convert cannon vector to three.js vector
+      contactNormal.set(
+        contact.ni.x,
+        contact.ni.y,
+        contact.ni.z
+      );
+      
+      // If the normal's y-component is significant, we hit the ground
+      if (contactNormal.y > 0.5) {
+        this.isOnGround = true;
+      }
+    });
   }
   
   update(deltaTime, inputController) {
-    // Handle rotation only when not in orbital camera mode
-    // Let the camera handle rotation in orbital mode
-    // if (inputController.mouseMovement.x !== 0) {
-    //   this.rotation.y -= inputController.mouseMovement.x * this.turnSpeed * deltaTime;
-    // }
-    
-    // Reset mouse movement after using it
-    // inputController.resetMouseMovement();
-    
     // Attack handling
     if (inputController.keys.action) {
       this.startAttack();
@@ -93,47 +117,85 @@ export class Player {
     // Apply rotation to movement direction
     moveDirection.applyEuler(new THREE.Euler(0, this.rotation.y, 0));
     
-    // Handle jumping
-    if (inputController.keys.jump && this.isOnGround) {
-      this.verticalVelocity = this.jumpForce;
-      this.isOnGround = false;
+    if (this.physicsEnabled && this.physicsBody) {
+      // Apply movement forces to physics body
+      const movementForce = new THREE.Vector3(
+        moveDirection.x * this.moveSpeed * 10, // Multiply by force factor
+        0,
+        moveDirection.z * this.moveSpeed * 10
+      );
+      
+      // Apply the force at the center of mass
+      this.physicsBody.applyLocalForce(
+        new THREE.Vector3(movementForce.x, 0, movementForce.z),
+        new THREE.Vector3(0, 0, 0)
+      );
+      
+      // Handle jumping with physics
+      if (inputController.keys.jump && this.isOnGround) {
+        // Apply upward impulse
+        this.physicsBody.applyImpulse(
+          new THREE.Vector3(0, this.jumpForce * 20, 0),
+          new THREE.Vector3(0, 0, 0)
+        );
+        this.isOnGround = false;
+      }
+      
+      // Update position and rotation from physics body
+      this.position.copy(
+        this.context.systems.physics.cannonVec3ToThree(this.physicsBody.position)
+      );
+      
+      // Manually update rotation (since we're using fixed rotation on the physics body)
+      this.rotation.y = Math.atan2(moveDirection.x, moveDirection.z);
+      
+      // Update mesh position and rotation
+      this.mesh.position.copy(this.position);
+      this.mesh.rotation.y = this.rotation.y;
+    } else {
+      // Fallback to the original movement logic when physics is not available
+      // Handle jumping
+      if (inputController.keys.jump && this.isOnGround) {
+        this.verticalVelocity = this.jumpForce;
+        this.isOnGround = false;
+      }
+      
+      // Apply gravity
+      this.verticalVelocity += -9.8 * deltaTime;
+      
+      // Calculate new position
+      const newPositionX = this.position.x + moveDirection.x * this.moveSpeed * deltaTime;
+      const newPositionZ = this.position.z + moveDirection.z * this.moveSpeed * deltaTime;
+      
+      // Check terrain height at new position before moving
+      const groundHeightAtNewPos = this.world.getHeightAt(newPositionX, newPositionZ);
+      const currentGroundHeight = this.world.getHeightAt(this.position.x, this.position.z);
+      
+      // Only allow movement if the slope isn't too steep (prevent climbing vertical walls)
+      const heightDifference = Math.abs(groundHeightAtNewPos - currentGroundHeight);
+      const maxClimbableSlope = 2.0; // Maximum height difference the player can climb in one step
+      
+      if (heightDifference <= maxClimbableSlope || groundHeightAtNewPos < currentGroundHeight) {
+        // Update horizontal position
+        this.position.x = newPositionX;
+        this.position.z = newPositionZ;
+      }
+      
+      // Update position based on vertical velocity
+      this.position.y += this.verticalVelocity * deltaTime;
+      
+      // Ground check
+      const groundHeight = this.world.getHeightAt(this.position.x, this.position.z);
+      if (this.position.y < groundHeight + 1) {
+        this.position.y = groundHeight + 1;
+        this.verticalVelocity = 0;
+        this.isOnGround = true;
+      }
+      
+      // Update mesh position and rotation
+      this.mesh.position.copy(this.position);
+      this.mesh.rotation.y = this.rotation.y;
     }
-    
-    // Apply gravity
-    this.verticalVelocity += this.gravity * deltaTime;
-    
-    // Calculate new position
-    const newPositionX = this.position.x + moveDirection.x * this.moveSpeed * deltaTime;
-    const newPositionZ = this.position.z + moveDirection.z * this.moveSpeed * deltaTime;
-    
-    // Check terrain height at new position before moving
-    const groundHeightAtNewPos = this.world.getHeightAt(newPositionX, newPositionZ);
-    const currentGroundHeight = this.world.getHeightAt(this.position.x, this.position.z);
-    
-    // Only allow movement if the slope isn't too steep (prevent climbing vertical walls)
-    const heightDifference = Math.abs(groundHeightAtNewPos - currentGroundHeight);
-    const maxClimbableSlope = 2.0; // Maximum height difference the player can climb in one step
-    
-    if (heightDifference <= maxClimbableSlope || groundHeightAtNewPos < currentGroundHeight) {
-      // Update horizontal position
-      this.position.x = newPositionX;
-      this.position.z = newPositionZ;
-    }
-    
-    // Update position based on vertical velocity
-    this.position.y += this.verticalVelocity * deltaTime;
-    
-    // Ground check
-    const groundHeight = this.world.getHeightAt(this.position.x, this.position.z);
-    if (this.position.y < groundHeight + 1) {
-      this.position.y = groundHeight + 1;
-      this.verticalVelocity = 0;
-      this.isOnGround = true;
-    }
-    
-    // Update mesh position and rotation
-    this.mesh.position.copy(this.position);
-    this.mesh.rotation.y = this.rotation.y;
   }
   
   getPosition() {
